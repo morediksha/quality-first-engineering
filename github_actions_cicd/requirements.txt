@@ -1,0 +1,9 @@
+playwright
+pytest
+pytest-xdist
+pytest-html
+allure-pytest
+flake8
+pylint
+bandit
+requests
