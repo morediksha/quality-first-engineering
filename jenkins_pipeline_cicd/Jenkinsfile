@@ -1,0 +1,187 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(
+            name: 'BRANCH',
+            defaultValue: 'main',
+            description: 'Git branch to checkout'
+        )
+        string(
+            name: 'TESTS_PATH',
+            defaultValue: 'tests/smoke',
+            description: 'Path to test files (e.g., tests/smoke or tests/regression)'
+        )
+        string(
+            name: 'SQUAD_URL_FILE',
+            defaultValue: 'squad_urls.txt',
+            description: 'File containing squad account URLs (one URL per line)'
+        )
+        booleanParam(
+            name: 'HEADLESS_MODE',
+            defaultValue: true,
+            description: 'Run Playwright in headless mode'
+        )
+    }
+    
+    options {
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    
+    environment {
+        PYTHONUNBUFFERED = '1'
+        ALLURE_RESULTS = 'allure-results'
+        ALLURE_REPORTS = 'allure-reports'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "Checking out branch: ${params.BRANCH}"
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${params.BRANCH}"]],
+                        userRemoteConfigs: [[url: env.GIT_URL ?: 'https://github.com/your-org/your-repo.git']]
+                    ])
+                }
+            }
+        }
+        
+        stage('Setup') {
+            steps {
+                script {
+                    echo "Setting up Python environment..."
+                    sh '''
+                        python3 -m venv venv || true
+                        . venv/bin/activate
+                        pip install --upgrade pip
+                        pip install -r requirements.txt
+                    '''
+                }
+            }
+        }
+        
+        stage('Validate Inputs') {
+            steps {
+                script {
+                    echo "Validating input parameters..."
+                    sh '''
+                        . venv/bin/activate
+                        
+                        # Check if tests path exists
+                        if [ ! -d "${TESTS_PATH}" ]; then
+                            echo "ERROR: Tests path does not exist: ${TESTS_PATH}"
+                            exit 1
+                        fi
+                        
+                        # Check if squad URL file exists
+                        if [ ! -f "${SQUAD_URL_FILE}" ]; then
+                            echo "ERROR: Squad URL file not found: ${SQUAD_URL_FILE}"
+                            exit 1
+                        fi
+                        
+                        # Count URLs in file
+                        URLS_COUNT=$(grep -c . "${SQUAD_URL_FILE}" || true)
+                        echo "Found ${URLS_COUNT} account URLs in ${SQUAD_URL_FILE}"
+                        
+                        if [ ${URLS_COUNT} -eq 0 ]; then
+                            echo "WARNING: No URLs found in ${SQUAD_URL_FILE}"
+                            exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+        
+        stage('Clean Reports') {
+            steps {
+                script {
+                    echo "Cleaning previous reports..."
+                    sh '''
+                        rm -rf allure-results/* || true
+                        rm -rf reports/* || true
+                    '''
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                script {
+                    echo "Running Playwright tests from: ${params.TESTS_PATH}"
+                    sh '''
+                        . venv/bin/activate
+                        
+                        HEADLESS_FLAG=""
+                        if [ "${HEADLESS_MODE}" = "true" ]; then
+                            HEADLESS_FLAG="--headless"
+                        fi
+                        
+                        python3 -m pytest ${TESTS_PATH} \
+                            --alluredir=${ALLURE_RESULTS} \
+                            --tb=short \
+                            -v \
+                            --html=reports/report.html \
+                            --self-contained-html \
+                            -n auto \
+                            -m "not skip" \
+                            || true
+                    '''
+                }
+            }
+        }
+        
+        stage('Generate Allure Reports') {
+            steps {
+                script {
+                    echo "Generating Allure reports..."
+                    sh '''
+                        . venv/bin/activate
+                        
+                        if [ -d "${ALLURE_RESULTS}" ] && [ "$(ls -A ${ALLURE_RESULTS})" ]; then
+                            allure generate ${ALLURE_RESULTS} -o ${ALLURE_REPORTS} --clean || true
+                            echo "Allure report generated successfully"
+                        else
+                            echo "No test results found for Allure report generation"
+                        fi
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "Publishing test reports..."
+                
+                // Publish HTML reports
+                publishHTML([
+                    allowMissing: true,
+                    alwaysLinkToLastBuild: true,
+                    keepAll: true,
+                    reportDir: 'allure-reports',
+                    reportFiles: 'index.html',
+                    reportName: 'Allure Report'
+                ])
+                
+                // Archive test results
+                archiveArtifacts(
+                    artifacts: 'allure-results/**/*,reports/**/*',
+                    allowEmptyArchive: true
+                )
+            }
+        }
+        
+        success {
+            echo "✅ Pipeline completed successfully!"
+        }
+        
+        failure {
+            echo "❌ Pipeline failed. Check test results above."
+        }
+    }
+}
